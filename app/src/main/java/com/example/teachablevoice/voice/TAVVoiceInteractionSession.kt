@@ -31,7 +31,6 @@ class TAVVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
     companion object {
         private const val TAG = "TAVVoiceSession"
         private const val RESTART_DELAY_MS = 1500L
-        private const val SILENCE_TIMEOUT_MS = 2000L
         private const val HARD_LISTENING_TIMEOUT_MS = 7000L
     }
 
@@ -43,7 +42,6 @@ class TAVVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
     private var geminiSttClient: GeminiLiveSttClient? = null
     
     private var accumulatedCommand = ""
-    private var silenceRunnable: Runnable? = null
     private var hardTimeoutRunnable: Runnable? = null
 
     override fun onCreate() {
@@ -86,12 +84,6 @@ class TAVVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
             override fun onTranscript(text: String, isFinal: Boolean) {
                 accumulatedCommand = if (accumulatedCommand.isEmpty()) text else "$accumulatedCommand $text"
                 voiceState.updatePartialText(accumulatedCommand)
-                
-                resetSilenceTimer()
-                
-                if (isFinal) {
-                    finalizeCommand()
-                }
             }
 
             override fun onError(error: String) {
@@ -124,12 +116,12 @@ class TAVVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
                 audioCaptureManager?.stop()
                 geminiSttClient?.sendEndOfAudio()
                 
-                // Fallback to finalize if no final transcript is received soon
+                // Give a short delay to allow final transcript chunks to arrive, then process
                 handler.postDelayed({
                     if (voiceState.current.state == VoiceListenerState.LISTENING) {
                         finalizeCommand()
                     }
-                }, 2000)
+                }, 500)
             }
         }
         handler.postDelayed(hardTimeoutRunnable!!, HARD_LISTENING_TIMEOUT_MS)
@@ -140,33 +132,12 @@ class TAVVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
         geminiSttClient?.close()
         audioCaptureManager = null
         geminiSttClient = null
-        silenceRunnable?.let { handler.removeCallbacks(it) }
         hardTimeoutRunnable?.let { handler.removeCallbacks(it) }
-    }
-
-    private fun resetSilenceTimer() {
-        silenceRunnable?.let { handler.removeCallbacks(it) }
-        silenceRunnable = Runnable {
-            if (voiceState.current.state == VoiceListenerState.LISTENING) {
-                Log.i(TAG, "Silence timeout, sending audioStreamEnd")
-                audioCaptureManager?.stop()
-                geminiSttClient?.sendEndOfAudio()
-                
-                // Fallback to finalize if no final transcript is received soon
-                handler.postDelayed({
-                    if (voiceState.current.state == VoiceListenerState.LISTENING) {
-                        finalizeCommand()
-                    }
-                }, 2000)
-            }
-        }
-        handler.postDelayed(silenceRunnable!!, SILENCE_TIMEOUT_MS)
     }
 
     private fun finalizeCommand() {
         if (voiceState.current.state != VoiceListenerState.LISTENING) return
         
-        silenceRunnable?.let { handler.removeCallbacks(it) }
         hardTimeoutRunnable?.let { handler.removeCallbacks(it) }
         val finalCommand = accumulatedCommand.trim()
         
